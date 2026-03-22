@@ -11,7 +11,7 @@ import subprocess
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.events import MouseMove, Resize
-from textual.widgets import DataTable, Footer, Header, TabbedContent, TabPane
+from textual.widgets import DataTable, Footer, Static, TabbedContent, TabPane
 from textual import on
 
 from .config import config_tab_enabled
@@ -63,7 +63,12 @@ class WatchDashboardApp(App):
         return config_tab_enabled(self._config_file, "actions")
 
     def compose(self) -> ComposeResult:
-        yield Header(icon="")
+        yield Static(
+            "╔═╗ ╦  ╦ ╔═╗ ╦═╗ ╦ ╦ ╔═╗ ╔╦╗ ╔═╗ ╦ ╦\n"
+            "║ ║ ╚╗╔╝ ║╣  ╠╦╝ ║║║ ╠═╣  ║  ║   ╠═╣\n"
+            "╚═╝  ╚╝  ╚═╝ ╩╚═ ╚╩╝ ╩ ╩  ╩  ╚═╝ ╩ ╩",
+            id="app-title",
+        )
         with TabbedContent(id="tabs"):
             if self._deploys_enabled():
                 with TabPane("Deploys", id="deploys-pane"):

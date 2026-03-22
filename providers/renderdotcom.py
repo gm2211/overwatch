@@ -508,9 +508,9 @@ def cmd_logs(service_id, deploy_id, log_type="build"):
         # Build/deploy logs: scoped to deploy window, oldest first
         params["direction"] = "forward"
         if start_time:
-            params["startTime"] = iso_to_epoch(start_time) or start_time
+            params["startTime"] = start_time
         if end_time:
-            params["endTime"] = iso_to_epoch(end_time) or end_time
+            params["endTime"] = end_time
 
     # Fetch logs with pagination
     total_printed = 0

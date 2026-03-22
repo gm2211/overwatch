@@ -16,6 +16,7 @@ class LogViewerModal(ModalScreen[None]):
     BINDINGS = [
         Binding("escape", "dismiss_modal", "Close", priority=True),
         Binding("q", "dismiss_modal", "Close", priority=True),
+        Binding("y", "copy_logs", "Copy", priority=True),
     ]
 
     DEFAULT_CSS = """
@@ -79,6 +80,7 @@ class LogViewerModal(ModalScreen[None]):
         self._providers_dir = providers_dir
         self._record = record
         self._loaded = set()
+        self._log_texts: dict[str, str] = {}  # pane_id → log text
 
     def compose(self) -> ComposeResult:
         rec = self._record
@@ -176,17 +178,56 @@ class LogViewerModal(ModalScreen[None]):
 
         wid = log_widget_id
         lt = log_type
+        pane_id = {"build-log": "build-pane", "deploy-log": "deploy-pane", "app-log": "app-pane"}.get(wid, "")
 
         def _show_logs():
             rich_log = self.query_one(f"#{wid}", RichLog)
             lines = log_text.splitlines()
             for line in lines:
                 rich_log.write(line)
+            self._log_texts[pane_id] = log_text
             self.query_one("#log-status", Static).update(
-                f"[dim]{len(lines)} lines ({lt}) | Esc to close[/dim]"
+                f"[dim]{len(lines)} lines ({lt}) | y copy | Esc close[/dim]"
             )
 
         self.app.call_from_thread(_show_logs)
+
+    def _get_active_pane_id(self) -> str:
+        try:
+            tabs = self.query_one("#log-tabs", TabbedContent)
+            return str(tabs.active)
+        except Exception:
+            return ""
+
+    def action_copy_logs(self) -> None:
+        """Copy current tab's log text to clipboard."""
+        import subprocess as sp
+        import platform
+        import shutil
+
+        pane_id = self._get_active_pane_id()
+        text = self._log_texts.get(pane_id, "")
+        if not text:
+            self.app.notify("No logs to copy", timeout=2)
+            return
+
+        # Try to copy to clipboard
+        if platform.system() == "Darwin" and shutil.which("pbcopy"):
+            cmd = ["pbcopy"]
+        elif shutil.which("xclip"):
+            cmd = ["xclip", "-selection", "clipboard"]
+        elif shutil.which("xsel"):
+            cmd = ["xsel", "--clipboard", "--input"]
+        else:
+            self.app.notify("No clipboard tool found", timeout=2)
+            return
+
+        try:
+            sp.run(cmd, input=text.encode(), timeout=5)
+            lines = len(text.splitlines())
+            self.app.notify(f"Copied {lines} lines", timeout=2)
+        except Exception:
+            self.app.notify("Failed to copy", timeout=2)
 
     def action_dismiss_modal(self) -> None:
         self.dismiss(None)

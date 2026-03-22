@@ -31,7 +31,7 @@ class DeployActionsModal(ModalScreen[DeployActionResult | None]):
         width: 55;
         max-width: 80%;
         height: auto;
-        max-height: 60%;
+        max-height: 90%;
         background: $surface;
         border: tall $primary;
         padding: 1 2;
@@ -45,13 +45,15 @@ class DeployActionsModal(ModalScreen[DeployActionResult | None]):
 
     DeployActionsModal #actions-info {
         width: 100%;
+        height: auto;
+        max-height: 4;
         color: $text-muted;
         margin-bottom: 1;
     }
 
     DeployActionsModal OptionList {
         height: auto;
-        max-height: 8;
+        max-height: 6;
     }
     """
 
@@ -67,16 +69,21 @@ class DeployActionsModal(ModalScreen[DeployActionResult | None]):
         env = rec.get("environment", "")
         title = f"{svc} ({env})" if env else svc or "Deploy"
 
-        info_lines = []
+        info_parts = []
         branch = rec.get("branch", "")
         commit = rec.get("commit", "")
         message = rec.get("message", "")
+        ref_parts = []
         if branch:
-            info_lines.append(f"[dim]Branch:[/dim] {branch}")
+            ref_parts.append(branch)
         if commit:
-            info_lines.append(f"[dim]Commit:[/dim] {commit}")
+            ref_parts.append(commit)
+        if ref_parts:
+            info_parts.append("[dim]Ref:[/dim] " + " @ ".join(ref_parts))
         if message:
-            info_lines.append(f"[dim]Message:[/dim] {message}")
+            msg = message if len(message) <= 60 else message[:58] + ".."
+            info_parts.append(f"[dim]Msg:[/dim] {msg}")
+        info_lines = info_parts
 
         with Vertical(id="actions-dialog"):
             yield Label(title, id="actions-title")
