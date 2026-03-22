@@ -15,7 +15,7 @@ HELP_TEXT = """\
   [bold]Tab / Shift+Tab[/bold]  Switch between Deploys / Actions tabs
   [bold]j / Down[/bold]         Move cursor down
   [bold]k / Up[/bold]           Move cursor up
-  [bold]Enter[/bold]            Open selected URL in browser
+  [bold]Enter[/bold]            Open action menu (website / deploy page)
 
 [bold underline]Global[/bold underline]
   [bold]?[/bold]                Show this help
@@ -24,6 +24,7 @@ HELP_TEXT = """\
 
 [bold underline]Deploys Tab[/bold underline]
   [bold]p[/bold]                Open Providers (configure / change)
+  [bold]c[/bold]                Configure columns (show/hide, reorder)
   [bold]d[/bold]                Disable dashboard pane for this project
 
 [bold underline]Tab configuration (.deploy-watch.json)[/bold underline]

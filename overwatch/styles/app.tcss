@@ -1,5 +1,5 @@
 /* =============================================================================
-   Watch Dashboard — Dark Theme (Catppuccin-inspired, matching beads-tui)
+   Overwatch — Dark Theme (Catppuccin-inspired)
    ============================================================================= */
 
 Screen {
@@ -92,7 +92,7 @@ DataTable {
     height: 1fr;
     background: #1e1e2e;
     color: #cdd6f4;
-    overflow-x: hidden;
+    overflow-x: auto;
     scrollbar-color: #44447a;
     scrollbar-color-hover: #89b4fa;
     scrollbar-color-active: #b4befe;

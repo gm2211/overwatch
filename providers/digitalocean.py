@@ -161,10 +161,47 @@ def _extract_commit_info(deployment):
     return commit_hash, commit_msg
 
 
-def _infer_environment(app):
-    """Infer environment from app spec or tier."""
+_BRANCH_ENV_MAP = {
+    "main": "prod",
+    "master": "prod",
+    "production": "prod",
+    "staging": "staging",
+    "stg": "staging",
+    "dev": "dev",
+    "develop": "dev",
+}
+
+_ENV_KEYWORDS = [
+    ("prod", "prod"),
+    ("main", "prod"),
+    ("master", "prod"),
+    ("staging", "staging"),
+    ("stg", "staging"),
+    ("dev", "dev"),
+]
+
+
+def _infer_environment_from_branch(branch: str) -> str:
+    """Infer environment from branch name."""
+    key = branch.lower().strip()
+    env = _BRANCH_ENV_MAP.get(key)
+    if env:
+        return env
+    for keyword, env_name in _ENV_KEYWORDS:
+        if keyword in key:
+            return env_name
+    return ""
+
+
+def _infer_environment(app, branch=""):
+    """Infer environment from branch name, falling back to app spec or tier."""
+    # Prefer branch-based inference
+    if branch:
+        env = _infer_environment_from_branch(branch)
+        if env:
+            return env
+
     spec = app.get("spec", {}) or {}
-    # Check for explicit environment in spec name
     name = spec.get("name", "") or app.get("spec", {}).get("name", "")
     name_lower = name.lower()
     if "prod" in name_lower or "production" in name_lower:
@@ -174,7 +211,6 @@ def _infer_environment(app):
     if "dev" in name_lower or "preview" in name_lower:
         return "dev"
 
-    # Check tier
     tier = (app.get("tier_slug", "") or "").lower()
     if "basic" in tier or "professional" in tier or "pro" in tier:
         return "prod"
@@ -184,7 +220,7 @@ def _infer_environment(app):
     return ""
 
 
-def _build_record(deployment, app_id, app_name, app_url, environment):
+def _build_record(deployment, app_id, app_name, app_url, environment, branch=""):
     """Build a single deploy record dict."""
     phase = deployment.get("phase", "")
     build_status, deploy_status = _map_phase(phase)
@@ -198,10 +234,12 @@ def _build_record(deployment, app_id, app_name, app_url, environment):
     record = {
         "commit": commit_hash[:7] if commit_hash else "",
         "tag": "",
+        "version": "",
         "message": commit_msg.split("\n")[0] if commit_msg else "",
         "author": "",
         "environment": environment,
         "service_name": app_name,
+        "branch": branch,
         "build_status": build_status,
         "deploy_status": deploy_status,
         "build_started": created_at,
@@ -212,6 +250,9 @@ def _build_record(deployment, app_id, app_name, app_url, environment):
         record["deploy_finished"] = updated_at
     else:
         record["deploy_finished"] = ""
+
+    record["service_id"] = app_id
+    record["deploy_id"] = deploy_id
 
     if app_url:
         record["service_url"] = app_url
@@ -242,7 +283,49 @@ def cmd_config():
     print(json.dumps(config))
 
 
+def _extract_branch(spec):
+    """Extract branch from the first component's git source in an app spec."""
+    for component_type in ("services", "static_sites", "workers", "jobs"):
+        for component in spec.get(component_type, []) or []:
+            for source_type in ("github", "gitlab", "git"):
+                source = component.get(source_type, {}) or {}
+                if source.get("branch"):
+                    return source["branch"]
+    return ""
+
+
+def _fetch_app_deploys(app, api_key):
+    """Fetch deploys for a single app. Returns list of (sort_key, record)."""
+    app_id = app.get("id", "")
+    spec = app.get("spec", {}) or {}
+    app_name = spec.get("name", "") or app_id
+    app_url = app.get("live_url", "") or app.get("default_ingress", "")
+    branch = _extract_branch(spec)
+    environment = _infer_environment(app, branch)
+
+    results = []
+    try:
+        data = api_get(
+            f"/apps/{app_id}/deployments?per_page={DEPLOYS_PER_APP}",
+            api_key,
+        )
+    except SystemExit:
+        _log.warning("Failed to fetch deployments for %s (non-fatal)", app_id)
+        return results
+
+    deployments = data.get("deployments", []) or []
+    _log.debug("App %s (%s): %d deployments", app_name, app_id, len(deployments))
+
+    for deployment in deployments:
+        record = _build_record(deployment, app_id, app_name, app_url, environment, branch)
+        sort_key = deployment.get("created_at", "")
+        results.append((sort_key, record))
+    return results
+
+
 def cmd_list():
+    from concurrent.futures import ThreadPoolExecutor
+
     api_key = get_config_from_env()
 
     apps = fetch_apps(api_key)
@@ -250,31 +333,18 @@ def cmd_list():
         _log.debug("No apps found")
         return
 
-    all_deploys = []  # (iso_timestamp, record)
-
-    for app in apps:
-        app_id = app.get("id", "")
-        spec = app.get("spec", {}) or {}
-        app_name = spec.get("name", "") or app_id
-        app_url = app.get("live_url", "") or app.get("default_ingress", "")
-        environment = _infer_environment(app)
-
-        try:
-            data = api_get(
-                f"/apps/{app_id}/deployments?per_page={DEPLOYS_PER_APP}",
-                api_key,
-            )
-        except SystemExit:
-            _log.warning("Failed to fetch deployments for %s (non-fatal)", app_id)
-            continue
-
-        deployments = data.get("deployments", []) or []
-        _log.debug("App %s (%s): %d deployments", app_name, app_id, len(deployments))
-
-        for deployment in deployments:
-            record = _build_record(deployment, app_id, app_name, app_url, environment)
-            sort_key = deployment.get("created_at", "")
-            all_deploys.append((sort_key, record))
+    # Fetch deploys from all apps in parallel
+    all_deploys = []
+    with ThreadPoolExecutor(max_workers=min(len(apps), 8)) as pool:
+        futures = [
+            pool.submit(_fetch_app_deploys, app, api_key)
+            for app in apps
+        ]
+        for future in futures:
+            try:
+                all_deploys.extend(future.result())
+            except Exception as e:
+                _log.warning("Error fetching deploys: %s", e)
 
     # Sort by time descending, truncate
     all_deploys.sort(key=lambda x: x[0], reverse=True)
@@ -285,12 +355,40 @@ def cmd_list():
                min(len(all_deploys), MAX_TOTAL_RECORDS), len(apps))
 
 
+def cmd_logs(app_id, deploy_id):
+    """Fetch and print deployment logs."""
+    api_key = get_config_from_env()
+
+    # DO API: GET /apps/{appId}/deployments/{deploymentId}/logs
+    try:
+        data = api_get(f"/apps/{app_id}/deployments/{deploy_id}/logs", api_key)
+    except SystemExit:
+        return
+
+    if isinstance(data, dict):
+        # Aggregate logs or component logs
+        for log_entry in data.get("historic_urls", []):
+            print(f"Log URL: {log_entry}")
+        live_url = data.get("live_url", "")
+        if live_url:
+            print(f"Live log URL: {live_url}")
+        # Some responses have direct log lines
+        for line in data.get("logs", []):
+            if isinstance(line, dict):
+                print(line.get("message", str(line)))
+            else:
+                print(str(line))
+    elif isinstance(data, list):
+        for entry in data:
+            print(str(entry))
+
+
 def main():
     _log.debug("--- invoked: %s", " ".join(sys.argv))
 
     if len(sys.argv) < 2:
         _log.error("No command given")
-        print("Usage: digitalocean.py <name|config|list>", file=sys.stderr)
+        print("Usage: digitalocean.py <name|config|list|logs>", file=sys.stderr)
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -301,6 +399,11 @@ def main():
             cmd_config()
         elif cmd == "list":
             cmd_list()
+        elif cmd == "logs":
+            if len(sys.argv) < 4:
+                print("Usage: digitalocean.py logs <appId> <deployId>", file=sys.stderr)
+                sys.exit(1)
+            cmd_logs(sys.argv[2], sys.argv[3])
         else:
             _log.error("Unknown command: %s", cmd)
             print(f"Error: unknown command '{cmd}'", file=sys.stderr)

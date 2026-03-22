@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -14,11 +15,12 @@ from textual.widgets import DataTable, Static
 from textual import work
 from rich.text import Text
 
-from ..config import config_read, config_write, config_get_provider, config_remove
+from ..config import config_read, config_write, config_get_provider, config_remove, config_get_tab, config_set_tab
 from ..providers import (
     list_providers,
     provider_display_name,
     fetch_deploys,
+    FetchError,
     format_elapsed,
     default_providers_dir,
 )
@@ -27,17 +29,9 @@ _log = logging.getLogger("overwatch")
 
 
 # Textual DataTable hover events can render badly under some terminals/multiplexers
-# (ghost header rows on mouse movement). Suppress all mouse-related rendering.
+# (ghost header rows on mouse movement). Suppress hover rendering but allow scroll.
 class _KeyboardOnlyDataTable(DataTable):
     def _on_mouse_move(self, event) -> None:  # type: ignore[override]
-        event.stop()
-        event.prevent_default()
-
-    def _on_mouse_down(self, event) -> None:  # type: ignore[override]
-        event.stop()
-        event.prevent_default()
-
-    def _on_mouse_up(self, event) -> None:  # type: ignore[override]
         event.stop()
         event.prevent_default()
 
@@ -110,8 +104,10 @@ class DeploysTab(Vertical):
         self._providers_dir = providers_dir or default_providers_dir()
         self._dash_id = dash_id
         self._config_file = os.path.join(project_dir, ".deploy-watch.json")
+        self._cache_file = os.path.join(project_dir, ".deploy-watch.cache.json")
         self._cached_records: list[dict] = []
         self._urls: list[str] = []
+        self._row_records: list[dict] = []
         self._fetch_error = ""
         self._last_fetch_time = 0
 
@@ -127,10 +123,34 @@ class DeploysTab(Vertical):
         )
         yield Static("", id="deploy-status")
 
+    def _load_cache(self) -> list[dict]:
+        """Load cached records from disk."""
+        try:
+            with open(self._cache_file, "r") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
+        return []
+
+    def _save_cache(self, records: list[dict]) -> None:
+        """Persist records to disk for instant next startup."""
+        try:
+            with open(self._cache_file, "w") as f:
+                json.dump(records, f)
+        except OSError:
+            pass
+
     def on_mount(self) -> None:
         table = self.query_one("#deploy-table", DataTable)
         table.mouse_hover = False
-        table.add_columns("Commit", "Version", "Service", "Env", "Message", "Build", "Deploy", "Elapsed")
+        # Show cached data immediately so the screen isn't empty
+        cached = self._load_cache()
+        if cached:
+            self._cached_records = cached
+            self._populate_table()
+        # Then refresh from the provider in the background
         self._refresh_data()
 
     def get_selected_url(self) -> str:
@@ -146,24 +166,72 @@ class DeploysTab(Vertical):
             pass
         return ""
 
+    def get_selected_record(self) -> dict | None:
+        """Return the full record for the currently selected row."""
+        table = self.query_one("#deploy-table", DataTable)
+        if table.row_count == 0:
+            return None
+        try:
+            row_idx = table.cursor_coordinate.row
+            if 0 <= row_idx < len(self._row_records):
+                return self._row_records[row_idx]
+        except Exception:
+            pass
+        return None
+
+    def _refresh_data(self, notify: bool = False) -> None:
+        """Start a background refresh. Set notify=True for user-initiated refreshes."""
+        # Update status bar immediately on the main thread (before worker starts)
+        try:
+            self.query_one("#deploy-status", Static).update(
+                "[bold #f9e2af]Refreshing…[/bold #f9e2af]"
+            )
+        except Exception:
+            pass
+        self._do_refresh(notify)
+
     @work(exclusive=True, thread=True)
-    def _refresh_data(self) -> None:
+    def _do_refresh(self, notify: bool = False) -> None:
         """Fetch deploy data from provider in a background thread."""
         provider = config_get_provider(self._config_file)
         if not provider:
             self.app.call_from_thread(self._show_unconfigured)
             return
 
-        records = fetch_deploys(self._config_file, self._providers_dir)
-        fetch_error = "Provider error" if records is None else ""
+        fetch_error = ""
+        try:
+            records = fetch_deploys(self._config_file, self._providers_dir)
+        except FetchError as exc:
+            _log.error("fetch_deploys: %s", exc)
+            records = None
+            fetch_error = str(exc)
+        except Exception as exc:
+            _log.error("fetch_deploys raised: %s", exc)
+            records = None
+            fetch_error = f"Unexpected error: {exc}"
+
+        if not fetch_error:
+            if records is None:
+                fetch_error = "Provider error"
+            elif not records:
+                fetch_error = "No records"
+
         fetch_time = int(time.time())
+        record_count = len(records) if records else 0
+        should_notify = notify
 
         def _apply() -> None:
             self._fetch_error = fetch_error
             if records is not None:
                 self._cached_records = records
+                self._save_cache(records)
             self._last_fetch_time = fetch_time
             self._populate_table()
+            if should_notify:
+                if fetch_error:
+                    self.app.notify(f"Refresh: {fetch_error}", timeout=3)
+                else:
+                    self.app.notify(f"Refreshed: {record_count} records", timeout=2)
 
         self.app.call_from_thread(_apply)
 
@@ -172,6 +240,7 @@ class DeploysTab(Vertical):
         table = self.query_one("#deploy-table", DataTable)
         table.clear()
         self._urls = []
+        self._row_records = []
         providers = list_providers(self._providers_dir)
         if providers:
             names = ", ".join(providers)
@@ -232,12 +301,82 @@ class DeploysTab(Vertical):
                 parts.append(Text(" | ", style="dim"))
         return Text.assemble(*parts)
 
+    # Approximate column widths (header + padding) for non-message columns.
+    _COL_WIDTH = {
+        "Commit": 9,
+        "Version": 12,
+        "Service": 16,
+        "Env": 9,
+        "Build": 11,
+        "Deploy": 11,
+        "Elapsed": 12,
+    }
+
+    # Default columns (Service and Version hidden by default).
+    _DEFAULT_COLUMNS = ["Commit", "Env", "Build", "Deploy", "Elapsed", "Message"]
+
+    def _get_columns(self) -> list[str]:
+        """Return the configured column list, or defaults."""
+        tab_cfg = config_get_tab(self._config_file, "deploys")
+        cols = tab_cfg.get("columns")
+        if isinstance(cols, list) and cols:
+            return cols
+        return list(self._DEFAULT_COLUMNS)
+
+    def _message_budget(self, columns: list[str]) -> int:
+        """Return max chars for the Message column, or 0 to hide it."""
+        if "Message" not in columns:
+            return 0
+        try:
+            width = self.app.size.width
+        except Exception:
+            width = 120
+        fixed_total = sum(self._COL_WIDTH.get(c, 10) for c in columns if c != "Message")
+        remaining = width - fixed_total
+        if remaining < 8:
+            return 0
+        return min(remaining, 60)
+
+    def _cell_for_column(self, col: str, rec: dict, msg_budget: int) -> Text:
+        """Build the Rich Text cell for a given column name."""
+        if col == "Commit":
+            return Text(rec.get("commit", "")[:7], style="bold")
+        elif col == "Version":
+            v = rec.get("tag", "") or rec.get("version", "")
+            return Text(v, style="#cba6f7") if v else Text("")
+        elif col == "Service":
+            s = rec.get("service_name", "")
+            return Text(s, style="bold") if s else Text("")
+        elif col == "Env":
+            return _env_text(rec.get("environment", ""))
+        elif col == "Build":
+            return _status_text(rec.get("build_status", ""))
+        elif col == "Deploy":
+            return _status_text(rec.get("deploy_status", ""))
+        elif col == "Elapsed":
+            return Text(format_elapsed(rec), style="dim")
+        elif col == "Message":
+            msg = rec.get("message", "")
+            if msg_budget > 0 and len(msg) > msg_budget:
+                msg = msg[: msg_budget - 2] + ".."
+            return Text(msg)
+        return Text("")
+
     def _populate_table(self) -> None:
         """Populate the DataTable with cached records."""
         table = self.query_one("#deploy-table", DataTable)
         table.clear(columns=True)
-        table.add_columns("Commit", "Version", "Service", "Env", "Message", "Build", "Deploy", "Elapsed")
+
+        columns = self._get_columns()
+        msg_budget = self._message_budget(columns)
+
+        # If message doesn't fit, drop it
+        if "Message" in columns and msg_budget <= 0:
+            columns = [c for c in columns if c != "Message"]
+
+        table.add_columns(*columns)
         self._urls = []
+        self._row_records = []
 
         records = self._cached_records
         if not records and not self._fetch_error:
@@ -246,41 +385,49 @@ class DeploysTab(Vertical):
                 self._show_unconfigured()
                 return
 
-        # Clear service URL header (multiple services makes it noisy)
         self.query_one("#deploy-service-url", Static).update("")
         self.query_one("#deploy-env-summary", Static).update(self._environment_summary(records))
 
         for rec in records:
-            commit = Text(rec.get("commit", "")[:7], style="bold")
-            version_str = rec.get("tag", "") or rec.get("version", "")
-            version = Text(version_str, style="#cba6f7") if version_str else Text("")
-            svc_name = rec.get("service_name", "")
-            service = Text(svc_name, style="bold") if svc_name else Text("")
-            env = _env_text(rec.get("environment", ""))
-            msg = rec.get("message", "")
-            if len(msg) > 50:
-                msg = msg[:48] + ".."
-            message = Text(msg)
-            build = _status_text(rec.get("build_status", ""))
-            deploy = _status_text(rec.get("deploy_status", ""))
-            elapsed = Text(format_elapsed(rec), style="dim")
-
-            table.add_row(commit, version, service, env, message, build, deploy, elapsed)
+            row = [self._cell_for_column(c, rec, msg_budget) for c in columns]
+            table.add_row(*row)
             self._urls.append(rec.get("deploy_url", "") or rec.get("service_url", ""))
+            self._row_records.append(rec)
 
         # Status line
         ts = time.strftime("%H:%M:%S")
         provider = config_get_provider(self._config_file)
         name = provider_display_name(provider, self._providers_dir) if provider else "—"
+        count = len(records) if records else 0
         if self._fetch_error:
-            status = f"[bold red]{self._fetch_error}[/bold red] | Provider: {name} | {ts}"
+            status = f"[bold red]{self._fetch_error}[/bold red] | {name} | {ts}"
         else:
-            status = f"Provider: {name} | Updated {ts}"
+            status = f"{name} | {count} deploys | Updated {ts}"
         self.query_one("#deploy-status", Static).update(status)
 
-    def refresh_data(self) -> None:
+    def on_resize(self) -> None:
+        """Re-populate table when terminal width changes to adjust message column."""
+        if self._cached_records:
+            self._populate_table()
+
+    def refresh_data(self, notify: bool = False) -> None:
         """Public trigger for refresh."""
-        self._refresh_data()
+        self._refresh_data(notify=notify)
+
+    def configure_columns(self) -> None:
+        """Open the column configuration modal."""
+        from ..modals.column_config import ColumnConfigModal
+
+        current = self._get_columns()
+
+        def _on_config(result: list[str] | None) -> None:
+            if result is None:
+                return
+            config_set_tab(self._config_file, "deploys", {"columns": result})
+            self._populate_table()
+            self.app.notify("Column config saved.")
+
+        self.app.push_screen(ColumnConfigModal(current), callback=_on_config)
 
     def configure_provider(self) -> None:
         """Launch provider picker → config flow."""

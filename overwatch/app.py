@@ -10,7 +10,7 @@ import subprocess
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.events import MouseMove, MouseDown, MouseUp, Resize
+from textual.events import MouseMove, Resize
 from textual.widgets import DataTable, Footer, Header, TabbedContent, TabPane
 from textual import on
 
@@ -27,7 +27,7 @@ POLL_INTERVAL = 30
 class WatchDashboardApp(App):
     """Tabbed dashboard: Deploys + GitHub Actions."""
 
-    TITLE = "Watch Dashboard"
+    TITLE = "Overwatch"
     CSS_PATH = "styles/app.tcss"
     ENABLE_COMMAND_PALETTE = False
 
@@ -36,6 +36,7 @@ class WatchDashboardApp(App):
         Binding("question_mark", "help", "Help", key_display="?"),
         Binding("r", "refresh", "Refresh"),
         Binding("p", "provider_config", "Providers"),
+        Binding("c", "column_config", "Columns"),
         Binding("d", "disable_deploy", "Disable", show=False),
         Binding("j", "cursor_down", "Down", show=False),
         Binding("k", "cursor_up", "Up", show=False),
@@ -76,17 +77,10 @@ class WatchDashboardApp(App):
                     yield ActionsTab(project_dir=self._project_dir)
         yield Footer()
 
-    # Suppress all mouse events — Textual's mouse tracking causes rendering
+    # Suppress mouse move/hover — Textual's mouse tracking causes rendering
     # artifacts (ghost headers, flickering) in terminal multiplexers like Zellij.
+    # Down/up are allowed so scrollbar interaction and scroll wheel work.
     def on_mouse_move(self, event: MouseMove) -> None:
-        event.stop()
-        event.prevent_default()
-
-    def on_mouse_down(self, event: MouseDown) -> None:
-        event.stop()
-        event.prevent_default()
-
-    def on_mouse_up(self, event: MouseUp) -> None:
         event.stop()
         event.prevent_default()
 
@@ -110,8 +104,6 @@ class WatchDashboardApp(App):
         )
         # Focus the DataTable in the initially active tab
         self._focus_active_table()
-        # Trigger initial data load after mount settles
-        self.set_timer(0.3, self._refresh_active_tab)
 
     @on(TabbedContent.TabActivated)
     def _on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
@@ -120,7 +112,7 @@ class WatchDashboardApp(App):
 
     @on(DataTable.RowSelected)
     def _on_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Open the URL for the selected row when Enter is pressed.
+        """Show action menu for the selected row when Enter is pressed.
 
         DataTable has its own Binding("enter", "select_cursor") which fires
         before the app-level "enter" -> "open_url" binding can reach us.
@@ -152,11 +144,11 @@ class WatchDashboardApp(App):
         tabbed = self.query_one("#tabs", TabbedContent)
         return str(tabbed.active)
 
-    def _refresh_active_tab(self) -> None:
+    def _refresh_active_tab(self, notify: bool = False) -> None:
         """Refresh the currently visible tab."""
         active = self._get_active_tab_id()
         if active == "deploys-pane":
-            self.query_one(DeploysTab).refresh_data()
+            self.query_one(DeploysTab).refresh_data(notify=notify)
         elif active == "actions-pane":
             self.query_one(ActionsTab).refresh_data()
 
@@ -168,12 +160,17 @@ class WatchDashboardApp(App):
         self.push_screen(HelpScreen())
 
     def action_refresh(self) -> None:
-        self._refresh_active_tab()
+        self._refresh_active_tab(notify=True)
 
     def action_provider_config(self) -> None:
         active = self._get_active_tab_id()
         if active == "deploys-pane":
             self.query_one(DeploysTab).manage_provider()
+
+    def action_column_config(self) -> None:
+        active = self._get_active_tab_id()
+        if active == "deploys-pane":
+            self.query_one(DeploysTab).configure_columns()
 
     def action_disable_deploy(self) -> None:
         active = self._get_active_tab_id()
@@ -204,13 +201,37 @@ class WatchDashboardApp(App):
 
     def action_open_url(self) -> None:
         active = self._get_active_tab_id()
-        url = ""
         if active == "deploys-pane":
-            url = self.query_one(DeploysTab).get_selected_url()
+            record = self.query_one(DeploysTab).get_selected_record()
+            if record:
+                from .modals.deploy_actions import DeployActionsModal, DeployActionResult
+
+                def _on_action(result: DeployActionResult | None) -> None:
+                    if result is None:
+                        return
+                    if result.action == "open_url" and result.url:
+                        _open_url(result.url)
+                    elif result.action == "view_logs":
+                        self._show_log_viewer(record)
+
+                self.push_screen(DeployActionsModal(record), callback=_on_action)
         elif active == "actions-pane":
             url = self.query_one(ActionsTab).get_selected_url()
-        if url:
-            _open_url(url)
+            if url:
+                _open_url(url)
+
+    def _show_log_viewer(self, record: dict) -> None:
+        """Open the log viewer modal for the given deploy record."""
+        from .modals.log_viewer import LogViewerModal
+
+        deploys_tab = self.query_one(DeploysTab)
+        self.push_screen(
+            LogViewerModal(
+                config_file=deploys_tab._config_file,
+                providers_dir=deploys_tab._providers_dir,
+                record=record,
+            )
+        )
 
 
 def _open_url(url: str) -> None:
