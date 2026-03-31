@@ -198,6 +198,48 @@ def fetch_logs(
         raise FetchError(f"Provider script not found: {script}")
 
 
+def cancel_deploy(
+    config_file: str,
+    providers_dir: str,
+    service_id: str,
+    deploy_id: str,
+) -> str:
+    """Call the provider's cancel command to cancel a deploy.
+
+    Returns success message or raises FetchError on failure.
+    """
+    cfg = config_read(config_file)
+    provider = cfg.get("provider")
+    if not provider:
+        raise FetchError("No provider configured")
+
+    script = os.path.join(providers_dir, provider)
+    if not os.access(script, os.X_OK):
+        raise FetchError(f"Provider script not executable: {script}")
+
+    fields = provider_config_fields(provider, providers_dir)
+    env = os.environ.copy()
+    provider_cfg = cfg.get(provider, {})
+    for field in fields:
+        key = field["key"]
+        val = provider_cfg.get(key, field.get("default", ""))
+        env[f"DEPLOY_WATCH_{key.upper()}"] = str(val)
+
+    try:
+        result = subprocess.run(
+            [script, "cancel", service_id, deploy_id],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+        if result.returncode != 0:
+            stderr_msg = result.stderr.strip()[:200] if result.stderr.strip() else f"exit code {result.returncode}"
+            raise FetchError(f"Cancel failed: {stderr_msg}")
+        return result.stdout.strip() or "Deploy cancelled"
+    except subprocess.TimeoutExpired:
+        raise FetchError("Cancel timed out (30s)")
+    except FileNotFoundError:
+        raise FetchError(f"Provider script not found: {script}")
+
+
 # ---------------------------------------------------------------------------
 # Time helpers
 # ---------------------------------------------------------------------------
@@ -218,7 +260,7 @@ def elapsed_since(start_epoch: int | str) -> str:
 
 
 def format_elapsed(record: dict) -> str:
-    """Format the elapsed/duration column for a deploy record."""
+    """Format the duration column for a deploy record."""
     build_started = record.get("build_started", "")
     deploy_finished = record.get("deploy_finished", "")
 
@@ -230,6 +272,7 @@ def format_elapsed(record: dict) -> str:
     except (ValueError, TypeError):
         return str(build_started)
 
+    # Completed deploy: show actual duration
     if deploy_finished:
         try:
             end = int(deploy_finished)
@@ -243,4 +286,19 @@ def format_elapsed(record: dict) -> str:
         except (ValueError, TypeError):
             pass
 
+    # In-progress: show running elapsed time
+    build_status = record.get("build_status", "")
+    deploy_status = record.get("deploy_status", "")
+    if build_status in ("building", "pending") or deploy_status in ("deploying", "pending"):
+        return elapsed_since(build_started)
+
+    # Terminal state without deploy_finished (cancelled, failed)
+    return "\u2014"
+
+
+def format_age(record: dict) -> str:
+    """Format how long ago the deploy was started."""
+    build_started = record.get("build_started", "")
+    if not build_started:
+        return ""
     return f"{elapsed_since(build_started)} ago"

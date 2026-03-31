@@ -558,12 +558,32 @@ def cmd_logs(service_id, deploy_id, log_type="build"):
         print("(no log entries in this time window)")
 
 
+def cmd_cancel(service_id, deploy_id):
+    """Cancel a deploy via the Render API."""
+    _, api_key = get_config_from_env()
+    url = f"{RENDER_API_BASE}/services/{service_id}/deploys/{deploy_id}/cancel"
+    req = urllib.request.Request(url, method="POST", headers={
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT, context=SSL_CONTEXT) as resp:
+            print("Deploy cancelled successfully")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        print(f"Error: Render API returned {e.code}: {body}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
     _log.debug("--- invoked: %s", " ".join(sys.argv))
 
     if len(sys.argv) < 2:
         _log.error("No command given")
-        print("Usage: renderdotcom.py <name|config|list|logs>", file=sys.stderr)
+        print("Usage: renderdotcom.py <name|config|list|logs|cancel>", file=sys.stderr)
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -580,6 +600,11 @@ def main():
                 sys.exit(1)
             lt = sys.argv[4] if len(sys.argv) > 4 else "build"
             cmd_logs(sys.argv[2], sys.argv[3], lt)
+        elif cmd == "cancel":
+            if len(sys.argv) < 4:
+                print("Usage: renderdotcom.py cancel <serviceId> <deployId>", file=sys.stderr)
+                sys.exit(1)
+            cmd_cancel(sys.argv[2], sys.argv[3])
         else:
             _log.error("Unknown command: %s", cmd)
             print(f"Error: unknown command '{cmd}'", file=sys.stderr)

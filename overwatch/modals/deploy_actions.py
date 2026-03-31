@@ -12,9 +12,10 @@ from textual.widgets.option_list import Option
 
 class DeployActionResult:
     """Result from the deploy actions modal."""
-    def __init__(self, action: str, url: str = ""):
-        self.action = action  # "open_url" or "view_logs"
+    def __init__(self, action: str, url: str = "", data: dict | None = None):
+        self.action = action  # "open_url", "view_logs", "cancel_deploy", "compare_commits"
         self.url = url
+        self.data = data or {}
 
 
 class DeployActionsModal(ModalScreen[DeployActionResult | None]):
@@ -53,15 +54,15 @@ class DeployActionsModal(ModalScreen[DeployActionResult | None]):
 
     DeployActionsModal OptionList {
         height: auto;
-        max-height: 6;
+        max-height: 10;
     }
     """
 
-    def __init__(self, record: dict) -> None:
+    def __init__(self, record: dict, env_commits: dict[str, str] | None = None) -> None:
         super().__init__()
         self._record = record
-        # Each option: (action, url)
-        self._options: list[tuple[str, str]] = []
+        self._env_commits = env_commits or {}
+        self._options: list[tuple[str, str, dict]] = []  # (action, url, data)
 
     def compose(self) -> ComposeResult:
         rec = self._record
@@ -100,16 +101,47 @@ class DeployActionsModal(ModalScreen[DeployActionResult | None]):
         has_ids = rec.get("service_id") and rec.get("deploy_id")
 
         if service_url:
-            self._options.append(("open_url", service_url))
+            self._options.append(("open_url", service_url, {}))
             option_list.add_option(Option("Open website", id="website"))
 
         if deploy_url:
-            self._options.append(("open_url", deploy_url))
+            self._options.append(("open_url", deploy_url, {}))
             option_list.add_option(Option("Open deploy page", id="deploy"))
 
         if has_ids:
-            self._options.append(("view_logs", ""))
+            self._options.append(("view_logs", "", {}))
             option_list.add_option(Option("View logs", id="logs"))
+
+        # Compare commits between environments
+        if len(self._env_commits) >= 2:
+            rec_env = (rec.get("environment", "") or "").strip().lower()
+            if rec_env in ("production",):
+                rec_env = "prod"
+            if rec_env in ("stg",):
+                rec_env = "staging"
+            other_envs = sorted(e for e in self._env_commits if e != rec_env)
+            for other in other_envs:
+                from_sha = self._env_commits.get(rec_env, "")
+                to_sha = self._env_commits[other]
+                if from_sha and to_sha and from_sha != to_sha:
+                    self._options.append(("compare_commits", "", {
+                        "from_env": rec_env,
+                        "to_env": other,
+                        "from_sha": from_sha,
+                        "to_sha": to_sha,
+                    }))
+                    option_list.add_option(Option(
+                        f"Compare commits: {rec_env} → {other}",
+                        id=f"compare-{other}",
+                    ))
+
+        # Cancel deploy
+        build_status = rec.get("build_status", "")
+        deploy_status = rec.get("deploy_status", "")
+        is_cancellable = build_status in ("building", "pending") or deploy_status in ("deploying", "pending")
+        if is_cancellable and rec.get("service_id") and rec.get("deploy_id"):
+            self._options.append(("cancel_deploy", "", {}))
+            option_list.add_option(Option("Cancel deploy", id="cancel"))
 
         if not self._options:
             self.dismiss(None)
@@ -120,8 +152,8 @@ class DeployActionsModal(ModalScreen[DeployActionResult | None]):
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         idx = event.option_index
         if 0 <= idx < len(self._options):
-            action, url = self._options[idx]
-            self.dismiss(DeployActionResult(action, url))
+            action, url, data = self._options[idx]
+            self.dismiss(DeployActionResult(action, url, data))
 
     def on_click(self, event) -> None:
         if self is event.widget:

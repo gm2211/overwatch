@@ -10,7 +10,7 @@ from textual.widgets import Label, OptionList, Static
 from textual.widgets.option_list import Option
 
 
-ALL_COLUMNS = ["Commit", "Version", "Service", "Env", "Build", "Deploy", "Elapsed", "Message"]
+ALL_COLUMNS = ["Commit", "Version", "Service", "Env", "Build", "Deploy", "Duration", "Age", "Message"]
 
 
 class ColumnConfigModal(ModalScreen[list[str] | None]):

@@ -207,9 +207,12 @@ class WatchDashboardApp(App):
     def action_open_url(self) -> None:
         active = self._get_active_tab_id()
         if active == "deploys-pane":
-            record = self.query_one(DeploysTab).get_selected_record()
+            deploys_tab = self.query_one(DeploysTab)
+            record = deploys_tab.get_selected_record()
             if record:
                 from .modals.deploy_actions import DeployActionsModal, DeployActionResult
+
+                env_commits = deploys_tab.get_live_commits_by_env()
 
                 def _on_action(result: DeployActionResult | None) -> None:
                     if result is None:
@@ -218,12 +221,56 @@ class WatchDashboardApp(App):
                         _open_url(result.url)
                     elif result.action == "view_logs":
                         self._show_log_viewer(record)
+                    elif result.action == "cancel_deploy":
+                        self._cancel_deploy(record)
+                    elif result.action == "compare_commits":
+                        self._show_commit_diff(result.data)
 
-                self.push_screen(DeployActionsModal(record), callback=_on_action)
+                self.push_screen(DeployActionsModal(record, env_commits), callback=_on_action)
         elif active == "actions-pane":
             url = self.query_one(ActionsTab).get_selected_url()
             if url:
                 _open_url(url)
+
+    def _cancel_deploy(self, record: dict) -> None:
+        """Cancel a deploy in a background thread."""
+        from .providers import cancel_deploy, FetchError
+
+        service_id = record.get("service_id", "")
+        deploy_id = record.get("deploy_id", "")
+        if not service_id or not deploy_id:
+            self.notify("Missing service/deploy ID", severity="error")
+            return
+
+        deploys_tab = self.query_one(DeploysTab)
+
+        def _do_cancel() -> None:
+            try:
+                msg = cancel_deploy(
+                    config_file=deploys_tab._config_file,
+                    providers_dir=deploys_tab._providers_dir,
+                    service_id=service_id,
+                    deploy_id=deploy_id,
+                )
+                self.call_from_thread(lambda: self.notify(msg, timeout=3))
+                self.call_from_thread(lambda: deploys_tab.refresh_data(notify=False))
+            except FetchError as e:
+                self.call_from_thread(lambda: self.notify(str(e), severity="error", timeout=5))
+
+        import threading
+        threading.Thread(target=_do_cancel, daemon=True).start()
+
+    def _show_commit_diff(self, data: dict) -> None:
+        """Open the commit diff modal."""
+        from .modals.commit_diff import CommitDiffModal
+
+        self.push_screen(CommitDiffModal(
+            project_dir=self._project_dir,
+            from_env=data["from_env"],
+            to_env=data["to_env"],
+            from_sha=data["from_sha"],
+            to_sha=data["to_sha"],
+        ))
 
     def _show_log_viewer(self, record: dict) -> None:
         """Open the log viewer modal for the given deploy record."""

@@ -35,6 +35,13 @@ Output JSON describing required configuration fields:
 - `required`: if true, the user must provide a value
 - `default`: default value if the user leaves the field blank
 
+### `./provider.sh cancel <serviceId> <deployId>`
+
+Cancel a pending or in-progress deploy. Exit 0 on success, non-zero on failure.
+Print a success message to stdout, or an error message to stderr.
+
+This command is optional — if the provider does not support it, the cancel option will not appear in the UI.
+
 ### `./provider.sh list`
 
 Output JSON lines (one JSON object per line), one per deploy, most recent first:
@@ -78,5 +85,5 @@ API keys are read from environment variables named in the config (e.g., `RENDER_
 
 1. Create a script in this directory (e.g., `my-provider.sh`)
 2. Make it executable: `chmod +x my-provider.sh`
-3. Implement all three commands: `name`, `config`, `list`
+3. Implement the required commands: `name`, `config`, `list` (and optionally `cancel`)
 4. Configure via the `watch-dashboard` TUI or manually edit `.deploy-watch.json`

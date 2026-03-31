@@ -250,6 +250,8 @@ class ActionsTab(Vertical):
         table.mouse_hover = False
         table.add_columns("Workflow", "Branch", "Status", "Conclusion", "Started", "Duration", "Commit")
         self._refresh_data()
+        # Periodically re-render so relative "ago" times stay current
+        self.set_interval(5.0, self._tick_elapsed, name="tick-elapsed")
 
     def get_selected_url(self) -> str:
         """Return the URL for the currently selected row, or empty string."""
@@ -356,6 +358,16 @@ class ActionsTab(Vertical):
         else:
             status = f"{repo} | Updated {ts}"
         self.query_one("#actions-status", Static).update(status)
+
+    def _tick_elapsed(self) -> None:
+        """Re-populate table so relative 'ago' times stay current."""
+        if not self._cached_runs:
+            return
+        table = self.query_one("#actions-table", DataTable)
+        saved_row = table.cursor_coordinate.row if table.row_count else 0
+        self._populate_table()
+        if table.row_count:
+            table.move_cursor(row=min(saved_row, table.row_count - 1))
 
     def refresh_data(self) -> None:
         """Public trigger for refresh."""

@@ -22,6 +22,7 @@ from ..providers import (
     fetch_deploys,
     FetchError,
     format_elapsed,
+    format_age,
     default_providers_dir,
 )
 
@@ -152,6 +153,8 @@ class DeploysTab(Vertical):
             self._populate_table()
         # Then refresh from the provider in the background
         self._refresh_data()
+        # Periodically re-render the table so relative "ago" times stay fresh
+        self.set_interval(5.0, self._tick_elapsed, name="tick-elapsed")
 
     def get_selected_url(self) -> str:
         """Return the URL for the currently selected row, or empty string."""
@@ -178,6 +181,18 @@ class DeploysTab(Vertical):
         except Exception:
             pass
         return None
+
+    def get_live_commits_by_env(self) -> dict[str, str]:
+        """Return {env: commit_sha} for the latest live deploy per environment."""
+        result: dict[str, str] = {}
+        for rec in self._cached_records:
+            env = self._normalize_env_name(str(rec.get("environment", "") or ""))
+            if not env or env in result:
+                continue
+            revision = self._revision_for_record(rec)
+            if revision:
+                result[env] = revision
+        return result
 
     def _refresh_data(self, notify: bool = False) -> None:
         """Start a background refresh. Set notify=True for user-initiated refreshes."""
@@ -309,11 +324,12 @@ class DeploysTab(Vertical):
         "Env": 9,
         "Build": 11,
         "Deploy": 11,
-        "Elapsed": 12,
+        "Duration": 12,
+        "Age": 10,
     }
 
     # Default columns (Service and Version hidden by default).
-    _DEFAULT_COLUMNS = ["Commit", "Env", "Build", "Deploy", "Elapsed", "Message"]
+    _DEFAULT_COLUMNS = ["Commit", "Env", "Build", "Deploy", "Duration", "Age", "Message"]
 
     def _get_columns(self) -> list[str]:
         """Return the configured column list, or defaults."""
@@ -353,8 +369,10 @@ class DeploysTab(Vertical):
             return _status_text(rec.get("build_status", ""))
         elif col == "Deploy":
             return _status_text(rec.get("deploy_status", ""))
-        elif col == "Elapsed":
+        elif col == "Duration":
             return Text(format_elapsed(rec), style="dim")
+        elif col == "Age":
+            return Text(format_age(rec), style="dim")
         elif col == "Message":
             msg = rec.get("message", "")
             if msg_budget > 0 and len(msg) > msg_budget:
@@ -404,6 +422,16 @@ class DeploysTab(Vertical):
         else:
             status = f"{name} | {count} deploys | Updated {ts}"
         self.query_one("#deploy-status", Static).update(status)
+
+    def _tick_elapsed(self) -> None:
+        """Re-populate table so relative 'ago' times stay current."""
+        if not self._cached_records:
+            return
+        table = self.query_one("#deploy-table", DataTable)
+        saved_row = table.cursor_coordinate.row if table.row_count else 0
+        self._populate_table()
+        if table.row_count:
+            table.move_cursor(row=min(saved_row, table.row_count - 1))
 
     def on_resize(self) -> None:
         """Re-populate table when terminal width changes to adjust message column."""
